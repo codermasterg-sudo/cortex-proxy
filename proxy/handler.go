@@ -41,7 +41,10 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 		return rawBody, "", nil
 	}
 
-	result, err := h.client.Compress(req.Context(), rawBody)
+	// 尽量获取 client agent：从 User-Agent 头提取，透传给平台
+	clientAgent := req.Header.Get("User-Agent")
+
+	result, err := h.client.Compress(req.Context(), rawBody, clientAgent)
 	if err != nil {
 		return rawBody, "", nil // 降级：透传原始 body
 	}

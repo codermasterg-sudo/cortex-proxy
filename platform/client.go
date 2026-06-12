@@ -49,13 +49,17 @@ func NewClient(baseURL, apiKey string, timeoutMS int) *Client {
 	}
 }
 
-func (c *Client) Compress(ctx context.Context, rawBody []byte) (*CompressResult, error) {
+// Compress 调用平台压缩 API。clientAgent 若非空则通过 X-Client-Agent 头传递给平台。
+func (c *Client) Compress(ctx context.Context, rawBody []byte, clientAgent string) (*CompressResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/compress", bytes.NewReader(rawBody))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	if clientAgent != "" {
+		req.Header.Set("X-Client-Agent", clientAgent)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
