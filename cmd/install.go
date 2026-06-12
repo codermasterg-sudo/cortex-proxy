@@ -25,7 +25,10 @@ func RunInstall(args []string) {
 		certDir = os.TempDir()
 	}
 	certDir = filepath.Join(certDir, "cortex-proxy")
-	os.MkdirAll(certDir, 0700)
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create config dir %s: %v\n", certDir, err)
+		os.Exit(1)
+	}
 
 	certPath := filepath.Join(certDir, "ca.crt")
 	keyPath := filepath.Join(certDir, "ca.key")
@@ -33,12 +36,27 @@ func RunInstall(args []string) {
 	// 写 CA cert
 	caCert := ca.Leaf
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
-	os.WriteFile(certPath, certPEM, 0644)
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to write CA cert to %s: %v\n", certPath, err)
+		os.Exit(1)
+	}
 
-	// 写 CA key
-	keyBytes, _ := x509.MarshalECPrivateKey(ca.PrivateKey.(*ecdsa.PrivateKey))
+	// 写 CA key（类型断言加安全检查）
+	ecKey, ok := ca.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "Unexpected CA private key type (expected ECDSA)")
+		os.Exit(1)
+	}
+	keyBytes, err := x509.MarshalECPrivateKey(ecKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to marshal CA key: %v\n", err)
+		os.Exit(1)
+	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-	os.WriteFile(keyPath, keyPEM, 0600)
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to write CA key to %s: %v\n", keyPath, err)
+		os.Exit(1)
+	}
 
 	// 写入系统信任链
 	if err := trustCA(certPath); err != nil {
@@ -57,8 +75,13 @@ func trustCA(certPath string) error {
 			"-k", "/Library/Keychains/System.keychain", certPath).Run()
 	case "linux":
 		dest := "/usr/local/share/ca-certificates/cortex-proxy.crt"
-		data, _ := os.ReadFile(certPath)
-		os.WriteFile(dest, data, 0644)
+		data, err := os.ReadFile(certPath)
+		if err != nil {
+			return fmt.Errorf("read cert: %w", err)
+		}
+		if err := os.WriteFile(dest, data, 0644); err != nil {
+			return fmt.Errorf("write to system CA dir: %w", err)
+		}
 		return exec.Command("update-ca-certificates").Run()
 	case "windows":
 		return exec.Command("certutil", "-addstore", "Root", certPath).Run()

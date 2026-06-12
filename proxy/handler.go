@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -27,6 +26,7 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 	if cfg != nil && !cfg.Compression.Enabled {
 		return nil, "", nil
 	}
+	// cfg == nil 表示配置尚未加载，默认启用压缩（内置 default）
 
 	rawBody, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -39,7 +39,7 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 		return rawBody, "", nil
 	}
 
-	result, err := h.client.Compress(context.Background(), rawBody)
+	result, err := h.client.Compress(req.Context(), rawBody)
 	if err != nil {
 		return rawBody, "", nil // 降级：透传原始 body
 	}

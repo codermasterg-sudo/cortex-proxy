@@ -87,6 +87,10 @@ func (c *Client) GetConfig(ctx context.Context) (*ProxyConfig, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("platform returned %d", resp.StatusCode)
+	}
+
 	var cfg ProxyConfig
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return nil, err
@@ -106,6 +110,9 @@ func (c *Client) Report(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("platform returned %d", resp.StatusCode)
+	}
 	return nil
 }

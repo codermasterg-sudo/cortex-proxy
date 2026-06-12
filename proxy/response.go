@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/cortex-io/cortex-proxy/platform"
 	"github.com/cortex-io/cortex-proxy/reporter"
@@ -20,8 +21,8 @@ func ExtractAndEnqueueUsage(
 	if recordID == "" {
 		return
 	}
-	// SSE 流式响应：不读取，直接透传
-	if resp.Header.Get("Content-Type") == "text/event-stream" {
+	// SSE 流式响应：不读取，直接透传（兼容 "text/event-stream; charset=utf-8" 等变体）
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		return
 	}
 

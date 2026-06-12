@@ -25,12 +25,31 @@ func RunStart(args []string) {
 		os.Exit(1)
 	}
 
-	client := platform.NewClient(*platformURL, *apiKey, 3000)
-	cfgMgr := platform.NewConfigManager(client, 5*time.Minute)
-	ctx := context.Background()
-	go cfgMgr.Start(ctx)
+	// 内置默认值，平台配置加载后会通过回调覆盖
+	const defaultTimeoutMS = 3000
+	const defaultBatchSize = 10
+	const defaultFlushInterval = 5 * time.Second
 
-	rep := reporter.New(*platformURL, *apiKey, 10, 5*time.Second)
+	client := platform.NewClient(*platformURL, *apiKey, defaultTimeoutMS)
+	cfgMgr := platform.NewConfigManager(client, 5*time.Minute)
+
+	// 同步拉取首次配置（忽略错误，失败时使用内置默认值）
+	ctx := context.Background()
+	cfgMgr.SyncRefresh(ctx)
+
+	rep := reporter.New(*platformURL, *apiKey, defaultBatchSize, defaultFlushInterval)
+
+	// 注册回调：平台配置刷新时更新 reporter 的动态参数
+	cfgMgr.OnRefresh(func(cfg *platform.ProxyConfig) {
+		rep.UpdateConfig(cfg.Reporting.BatchSize, cfg.Reporting.FlushIntervalMS)
+	})
+
+	// 应用已加载的配置（如果首次同步成功）
+	if cfg := cfgMgr.Get(); cfg != nil {
+		rep.UpdateConfig(cfg.Reporting.BatchSize, cfg.Reporting.FlushIntervalMS)
+	}
+
+	go cfgMgr.Start(ctx)
 	go rep.Start(ctx)
 
 	proxyServer, err := proxy.NewProxyServer(client, cfgMgr, rep)
