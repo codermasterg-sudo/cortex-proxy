@@ -1,0 +1,19 @@
+# Build output
+cortex-proxy
+cortex-proxy.exe
+dist/
+
+# Go
+*.test
+*.out
+vendor/
+
+# TLS certs (generated at runtime)
+certs/
+*.pem
+*.crt
+*.key
+
+# Config
+.env
+config.local.yaml
