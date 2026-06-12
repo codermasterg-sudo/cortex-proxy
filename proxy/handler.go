@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 
 	"github.com/cortex-io/cortex-proxy/platform"
@@ -34,8 +35,9 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 	}
 	req.Body = io.NopCloser(bytes.NewReader(rawBody))
 
-	// 只压缩 application/json（LLM API 请求）
-	if req.Header.Get("Content-Type") != "application/json" {
+	// 只压缩 application/json（LLM API 请求），用 mime.ParseMediaType 剥离 charset 等参数
+	mediaType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		return rawBody, "", nil
 	}
 

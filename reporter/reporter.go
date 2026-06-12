@@ -10,22 +10,26 @@ import (
 	"time"
 )
 
-const flushHTTPTimeout = 10 * time.Second
+const flushHTTPTimeout = 1 * time.Second
+const maxRetries = 3
 
 type Reporter struct {
 	platformURL string
 	apiKey      string
+	httpClient  *http.Client
 
-	mu          sync.Mutex
-	batchSize   int
-	flushEvery  time.Duration
-	buffer      []map[string]any
+	mu         sync.Mutex
+	batchSize  int
+	flushEvery time.Duration
+	buffer     []map[string]any
+	flushing   bool // 防止并发 flush goroutine
 }
 
 func New(platformURL, apiKey string, batchSize int, flushEvery time.Duration) *Reporter {
 	return &Reporter{
 		platformURL: platformURL,
 		apiKey:      apiKey,
+		httpClient:  &http.Client{Timeout: flushHTTPTimeout},
 		batchSize:   batchSize,
 		flushEvery:  flushEvery,
 	}
@@ -50,7 +54,7 @@ func (r *Reporter) Enqueue(usage map[string]any) {
 	shouldFlush := r.batchSize > 0 && len(r.buffer) >= r.batchSize
 	r.mu.Unlock()
 	if shouldFlush {
-		go r.flush() // 异步 flush，不阻塞请求处理 goroutine
+		go r.flush()
 	}
 }
 
@@ -74,13 +78,20 @@ func (r *Reporter) Start(ctx context.Context) {
 
 func (r *Reporter) flush() {
 	r.mu.Lock()
-	if len(r.buffer) == 0 {
+	if r.flushing || len(r.buffer) == 0 {
 		r.mu.Unlock()
 		return
 	}
+	r.flushing = true
 	batch := r.buffer
 	r.buffer = nil
 	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		r.flushing = false
+		r.mu.Unlock()
+	}()
 
 	payload, err := json.Marshal(map[string]any{"llm_usages": batch})
 	if err != nil {
@@ -88,22 +99,32 @@ func (r *Reporter) flush() {
 		return
 	}
 
-	client := &http.Client{Timeout: flushHTTPTimeout}
-	req, err := http.NewRequest(http.MethodPost, r.platformURL+"/v1/internal/report", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("cortex-proxy: reporter build request error: %v", err)
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+r.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*200) * time.Millisecond)
+		}
+		req, err := http.NewRequest(http.MethodPost, r.platformURL+"/v1/internal/report", bytes.NewReader(payload))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+r.apiKey)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("cortex-proxy: reporter flush error: %v", err)
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			lastErr = nil // 4xx 不重试（通常是认证问题，重试无意义）
+			log.Printf("cortex-proxy: reporter flush got HTTP %d", resp.StatusCode)
+		}
 		return
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		log.Printf("cortex-proxy: reporter flush got HTTP %d", resp.StatusCode)
+	if lastErr != nil {
+		log.Printf("cortex-proxy: reporter flush failed after %d retries: %v", maxRetries, lastErr)
 	}
 }
