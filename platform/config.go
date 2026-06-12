@@ -53,9 +53,10 @@ func (m *ConfigManager) refresh(ctx context.Context) {
 	}
 	m.mu.Lock()
 	m.current = cfg
+	callbacks := m.onRefresh
 	m.mu.Unlock()
 
-	for _, fn := range m.onRefresh {
+	for _, fn := range callbacks {
 		fn(cfg)
 	}
 }

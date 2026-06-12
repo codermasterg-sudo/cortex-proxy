@@ -38,13 +38,13 @@ func ExtractAndEnqueueUsage(
 	}
 
 	usage := map[string]any{"record_id": recordID}
+	nested, _ := data["usage"].(map[string]any)
 	for _, field := range fields {
 		if v, ok := data[field]; ok {
 			usage[field] = v
-		}
-		// 嵌套在 usage 对象里（OpenAI 格式）
-		if u, ok := data["usage"].(map[string]any); ok {
-			if v, ok := u[field]; ok {
+		} else if nested != nil {
+			// 嵌套在 usage 对象里（OpenAI 格式）
+			if v, ok := nested[field]; ok {
 				usage[field] = v
 			}
 		}

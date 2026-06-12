@@ -18,11 +18,12 @@ type Reporter struct {
 	apiKey      string
 	httpClient  *http.Client
 
-	mu         sync.Mutex
-	batchSize  int
-	flushEvery time.Duration
-	buffer     []map[string]any
-	flushing   bool // 防止并发 flush goroutine
+	mu           sync.Mutex
+	batchSize    int
+	flushEvery   time.Duration
+	buffer       []map[string]any
+	flushing     bool // 防止并发 flush goroutine
+	intervalCh   chan time.Duration
 }
 
 func New(platformURL, apiKey string, batchSize int, flushEvery time.Duration) *Reporter {
@@ -32,19 +33,29 @@ func New(platformURL, apiKey string, batchSize int, flushEvery time.Duration) *R
 		httpClient:  &http.Client{Timeout: flushHTTPTimeout},
 		batchSize:   batchSize,
 		flushEvery:  flushEvery,
+		intervalCh:  make(chan time.Duration, 1),
 	}
 }
 
 // UpdateConfig 动态更新 batchSize 和 flushEvery（由 ConfigManager 刷新后调用）。
-// 注意：flushEvery 变更只在下一次 ticker 重建时生效，调用方需重启 Start goroutine 或接受渐进生效。
+// flushEvery 变更会通过 intervalCh 通知 Start() 立即重建 ticker。
 func (r *Reporter) UpdateConfig(batchSize int, flushEveryMS int) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if batchSize > 0 {
 		r.batchSize = batchSize
 	}
+	var newInterval time.Duration
 	if flushEveryMS > 0 {
-		r.flushEvery = time.Duration(flushEveryMS) * time.Millisecond
+		newInterval = time.Duration(flushEveryMS) * time.Millisecond
+		r.flushEvery = newInterval
+	}
+	r.mu.Unlock()
+
+	if newInterval > 0 {
+		select {
+		case r.intervalCh <- newInterval:
+		default: // 已有待处理的变更，丢弃旧值
+		}
 	}
 }
 
@@ -69,6 +80,8 @@ func (r *Reporter) Start(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			go r.flush()
+		case newInterval := <-r.intervalCh:
+			ticker.Reset(newInterval)
 		case <-ctx.Done():
 			r.flush() // 关闭时同步 flush 确保数据不丢
 			return
