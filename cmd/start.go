@@ -42,14 +42,16 @@ func RunStart(args []string) {
 
 	rep := reporter.New(*platformURL, *apiKey, defaultBatchSize, defaultFlushInterval)
 
-	// 注册回调：平台配置刷新时更新 reporter 的动态参数
+	// 注册回调：平台配置刷新时更新动态参数
 	cfgMgr.OnRefresh(func(cfg *platform.ProxyConfig) {
 		rep.UpdateConfig(cfg.Reporting.BatchSize, cfg.Reporting.FlushIntervalMS)
+		client.UpdateCompressTimeout(cfg.Compression.TimeoutMS)
 	})
 
 	// 应用已加载的配置（如果首次同步成功）
 	if cfg := cfgMgr.Get(); cfg != nil {
 		rep.UpdateConfig(cfg.Reporting.BatchSize, cfg.Reporting.FlushIntervalMS)
+		client.UpdateCompressTimeout(cfg.Compression.TimeoutMS)
 	}
 
 	go cfgMgr.Start(ctx)

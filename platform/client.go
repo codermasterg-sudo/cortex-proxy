@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,25 +35,46 @@ type ProxyConfig struct {
 }
 
 type Client struct {
-	baseURL    string
-	apiKey     string
+	baseURL string
+	apiKey  string
+
+	// httpClient 用于 config 拉取和 report 上报，固定超时。
 	httpClient *http.Client
+	// compressClient 用于压缩请求，不设 Timeout，完全由 context.WithTimeout 控制，
+	// 避免 httpClient.Timeout 静默截断动态超时配置。
+	compressClient *http.Client
+
+	// compressTimeoutMS 存储压缩请求超时（毫秒），支持动态更新。
+	compressTimeoutMS atomic.Int64
 }
 
-func NewClient(baseURL, apiKey string, timeoutMS int) *Client {
-	return &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		httpClient: &http.Client{
-			Timeout: time.Duration(timeoutMS) * time.Millisecond,
-		},
+func NewClient(baseURL, apiKey string, defaultTimeoutMS int) *Client {
+	c := &Client{
+		baseURL:        baseURL,
+		apiKey:         apiKey,
+		httpClient:     &http.Client{Timeout: time.Duration(defaultTimeoutMS) * time.Millisecond},
+		compressClient: &http.Client{}, // 无超时，由 context 控制
+	}
+	c.compressTimeoutMS.Store(int64(defaultTimeoutMS))
+	return c
+}
+
+// UpdateCompressTimeout 动态更新压缩请求超时，由 ConfigManager 刷新后调用。
+func (c *Client) UpdateCompressTimeout(timeoutMS int) {
+	if timeoutMS > 0 {
+		c.compressTimeoutMS.Store(int64(timeoutMS))
 	}
 }
 
 // Compress 调用平台压缩 API。clientAgent 若非空则通过 X-Client-Agent 头传递给平台。
 // instanceID 若非空则通过 X-Proxy-Instance-ID 头传递，平台记录到 compress_records。
+// 压缩超时从 compressTimeoutMS 动态读取，可通过 UpdateCompressTimeout 实时调整。
 func (c *Client) Compress(ctx context.Context, rawBody []byte, clientAgent string, instanceID string) (*CompressResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/compress", bytes.NewReader(rawBody))
+	timeoutMS := c.compressTimeoutMS.Load()
+	compressCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(compressCtx, http.MethodPost, c.baseURL+"/v1/compress", bytes.NewReader(rawBody))
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +87,7 @@ func (c *Client) Compress(ctx context.Context, rawBody []byte, clientAgent strin
 		req.Header.Set("X-Proxy-Instance-ID", instanceID)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.compressClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

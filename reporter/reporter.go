@@ -102,8 +102,12 @@ func (r *Reporter) flush() {
 
 	defer func() {
 		r.mu.Lock()
+		needsReflush := r.batchSize > 0 && len(r.buffer) >= r.batchSize
 		r.flushing = false
 		r.mu.Unlock()
+		if needsReflush {
+			go r.flush()
+		}
 	}()
 
 	payload, err := json.Marshal(map[string]any{"llm_usages": batch})

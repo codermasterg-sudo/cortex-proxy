@@ -23,7 +23,10 @@ type requestMeta struct {
 }
 
 func LoadCA() (*tls.Certificate, error) {
-	cfgDir, _ := os.UserConfigDir()
+	cfgDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine user config dir: %w", err)
+	}
 	certPath := filepath.Join(cfgDir, "cortex-proxy", "ca.crt")
 	keyPath := filepath.Join(cfgDir, "cortex-proxy", "ca.key")
 	ca, err := tls.LoadX509KeyPair(certPath, keyPath)

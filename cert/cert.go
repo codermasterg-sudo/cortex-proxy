@@ -45,6 +45,11 @@ func GenerateCA() (*tls.Certificate, error) {
 	return &cert, nil
 }
 
+// ParseLeaf 解析 DER 编码的证书，用于 tls.Certificate.Leaf 补全。
+func ParseLeaf(der []byte) (*x509.Certificate, error) {
+	return x509.ParseCertificate(der)
+}
+
 func IssueForHost(ca *tls.Certificate, host string) (*tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

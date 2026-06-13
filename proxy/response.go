@@ -1,12 +1,13 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cortex-io/cortex-proxy/platform"
 	"github.com/cortex-io/cortex-proxy/reporter"
@@ -14,27 +15,30 @@ import (
 
 // ExtractAndEnqueueUsage 从响应中提取上报字段并入队。
 // - 普通 JSON 响应：直接解析，按 fields 提取
-// - SSE 流式响应：实时分叉，不阻塞 agent 接收流，goroutine 聚合字段后触发上报
+// - SSE 流式响应：非阻塞旁路，不影响 agent 接收流速度
+// usage 数据允许丢失，失败时只记日志不阻断主流。
 func ExtractAndEnqueueUsage(
 	resp *http.Response,
 	recordID string,
 	fields []string,
 	rep *reporter.Reporter,
+	ttfbMs int,
+	startTime time.Time,
 ) {
 	if recordID == "" {
 		return
 	}
 
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		tapSSEStream(resp, recordID, fields, rep)
+		tapSSEStream(resp, recordID, fields, rep, ttfbMs, startTime)
 		return
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("cortex-proxy: read JSON response body error: %v", err)
 		return
 	}
-	// 还原 body 供下游读取（bytes.NewReader 避免多余的字节→字符串拷贝）
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 
 	var data map[string]any
@@ -42,87 +46,103 @@ func ExtractAndEnqueueUsage(
 		return
 	}
 	collected := collectFields(data, recordID, fields)
+	collected["ttfb_ms"] = ttfbMs
+	collected["total_latency_ms"] = int(time.Since(startTime).Milliseconds())
 	if len(collected) > 1 {
 		rep.Enqueue(collected)
 	}
 }
 
-// tapSSEStream 将 SSE body 实时分叉：
-//   - resp.Body 替换为透明的 teeReadCloser，goproxy 读取时同时写入 pipe
-//   - goroutine 从 pipe 读取，逐行解析 data: 事件，聚合配置字段
-//   - 遇到 [DONE] 或流结束时触发一次上报
+// tapSSEStream 将 SSE body 替换为 sseReadCloser，主流读取时同步将每行拷贝到缓冲 channel。
+// 独立 goroutine 从 channel 消费行、解析 usage 字段并上报；channel 带缓冲，消费慢时写端
+// 立即丢弃溢出（usage 允许丢失），绝不阻塞主流读取速度。
 //
-// agent 接收流的延迟不受影响。
+// 参考 one-api 的同步旁路方案：主流与旁路复用同一次 Read，通过带缓冲 channel 解耦。
 func tapSSEStream(
 	resp *http.Response,
 	recordID string,
 	fields []string,
 	rep *reporter.Reporter,
+	ttfbMs int,
+	startTime time.Time,
 ) {
-	pr, pw := io.Pipe()
+	// 64 行缓冲足以覆盖正常 SSE 流的突发写入；消费方落后时丢弃而非阻塞。
+	lineCh := make(chan string, 64)
 
 	orig := resp.Body
-	resp.Body = &teeReadCloser{
-		r:    io.TeeReader(orig, pw),
-		pw:   pw,
-		orig: orig,
-	}
+	resp.Body = &sseReadCloser{orig: orig, lineCh: lineCh}
 
 	go func() {
-		defer pr.Close()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("cortex-proxy: SSE consumer panic: %v", r)
+			}
+		}()
 
-		// 聚合：从所有事件中收集目标字段，后出现的值覆盖前面的
-		// 这样可以跨多个 SSE 事件聚合（如 Anthropic 的 input tokens 在 message_start，
-		// output tokens 在 message_delta）
 		collected := map[string]any{"record_id": recordID}
 
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 128*1024), 128*1024)
-
-		for scanner.Scan() {
-			line := scanner.Text()
+		for line := range lineCh {
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if payload == "[DONE]" {
-				break
-			}
-			if payload == "" {
+			if payload == "[DONE]" || payload == "" {
 				continue
 			}
-
 			var event map[string]any
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
-				// 非 JSON 或不完整 chunk，跳过继续扫描
 				continue
 			}
-
-			// 按 fields 配置从当前事件提取字段，合并到 collected
 			mergeFields(collected, event, fields)
 		}
 
-		// [DONE] 或流自然结束后，只要有至少一个目标字段就上报
+		collected["ttfb_ms"] = ttfbMs
+		collected["total_latency_ms"] = int(time.Since(startTime).Milliseconds())
 		if len(collected) > 1 {
 			rep.Enqueue(collected)
 		}
 	}()
 }
 
-// teeReadCloser 包装原始 body：Read 时同步写入 pipe，Close 时关闭 pipe 通知消费 goroutine。
-type teeReadCloser struct {
-	r    io.Reader      // TeeReader(orig, pw)
-	pw   *io.PipeWriter // 写端，Close 时关闭以通知消费方 EOF
-	orig io.ReadCloser  // 原始 body
+// sseReadCloser 包装原始 SSE body。每次 Read 时直接读入调用方的 p，
+// 同步扫描完整行，非阻塞地发到 lineCh；channel 满则静默丢弃（usage 允许丢失）。
+// Close 时关闭 lineCh，通知消费 goroutine 退出。
+type sseReadCloser struct {
+	orig   io.ReadCloser
+	lineCh chan string
+	buf    bytes.Buffer // 跨 Read 拼接不完整行
 }
 
-func (t *teeReadCloser) Read(p []byte) (int, error) {
-	return t.r.Read(p)
+func (s *sseReadCloser) Read(p []byte) (int, error) {
+	n, err := s.orig.Read(p)
+	if n > 0 {
+		s.scanLines(p[:n])
+	}
+	return n, err
 }
 
-func (t *teeReadCloser) Close() error {
-	t.pw.Close() // 让 goroutine 的 scanner 收到 EOF
-	return t.orig.Close()
+// scanLines 按行扫描字节切片，将完整行（含跨 Read 拼接的行）非阻塞发到 lineCh。
+func (s *sseReadCloser) scanLines(data []byte) {
+	s.buf.Write(data)
+	for {
+		b := s.buf.Bytes()
+		idx := bytes.IndexByte(b, '\n')
+		if idx < 0 {
+			break
+		}
+		line := strings.TrimRight(string(b[:idx]), "\r")
+		s.buf.Next(idx + 1)
+		select {
+		case s.lineCh <- line:
+		default: // channel 满，丢弃此行（usage 允许丢失）
+		}
+	}
+}
+
+func (s *sseReadCloser) Close() error {
+	err := s.orig.Close()
+	close(s.lineCh) // 通知消费 goroutine 退出
+	return err
 }
 
 // mergeFields 从 event（及其 usage 子对象）中提取 fields 配置的字段，写入 dst。
