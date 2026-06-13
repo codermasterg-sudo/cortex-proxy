@@ -49,12 +49,17 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 		return rawBody, "", nil // 降级：透传原始 body
 	}
 
-	// 重组 body：保留原始 JSON 的其他字段，只替换 messages
-	var original map[string]any
+	// 重组 body：用 json.RawMessage 保留所有原始字段的字节表示，只替换 messages。
+	// 避免 map[string]any 的 float64 中转导致大整数精度丢失或格式变化。
+	var original map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &original); err != nil {
 		return rawBody, "", nil
 	}
-	original["messages"] = result.Messages
+	messagesBytes, err := json.Marshal(result.Messages)
+	if err != nil {
+		return rawBody, "", nil
+	}
+	original["messages"] = json.RawMessage(messagesBytes)
 	newBodyBytes, err := json.Marshal(original)
 	if err != nil {
 		return rawBody, "", nil

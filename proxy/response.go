@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,8 +34,8 @@ func ExtractAndEnqueueUsage(
 	if err != nil {
 		return
 	}
-	// 还原 body 供下游读取
-	resp.Body = io.NopCloser(strings.NewReader(string(body)))
+	// 还原 body 供下游读取（bytes.NewReader 避免多余的字节→字符串拷贝）
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
