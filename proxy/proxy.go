@@ -8,11 +8,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/cortex-io/cortex-proxy/cert"
 	"github.com/cortex-io/cortex-proxy/platform"
 	"github.com/cortex-io/cortex-proxy/reporter"
 	"github.com/elazarl/goproxy"
 )
+
+// requestMeta 保存每个请求的上下文信息，通过 ctx.UserData 传递
+type requestMeta struct {
+	RecordID  string
+	StartTime time.Time
+}
 
 func LoadCA() (*tls.Certificate, error) {
 	cfgDir, _ := os.UserConfigDir()
@@ -22,6 +30,7 @@ func LoadCA() (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	ca.Leaf, _ = cert.ParseLeaf(ca.Certificate[0])
 	return &ca, nil
 }
 
@@ -29,45 +38,46 @@ func NewProxyServer(
 	client *platform.Client,
 	configMgr *platform.ConfigManager,
 	rep *reporter.Reporter,
+	instanceID string,
 ) (*goproxy.ProxyHttpServer, error) {
 	ca, err := LoadCA()
 	if err != nil {
 		return nil, fmt.Errorf("CA not found — run `cortex-proxy install` first: %w", err)
 	}
 
-	handler := NewHandler(client, configMgr)
+	handler := NewHandler(client, configMgr, instanceID)
 	p := goproxy.NewProxyHttpServer()
 	p.Verbose = false
 
-	// 将自签 CA 注入 goproxy，用于 MITM TLS 签名
-	goproxy.GoproxyCa = *ca
-	// 重新初始化全局 MITM ConnectAction，使其使用我们的 CA
-	goproxy.OkConnect = &goproxy.ConnectAction{
+	// 实例级 MITM 配置：通过 FuncHttpsHandler 避免覆写 goproxy 全局变量
+	mitmAction := &goproxy.ConnectAction{
 		Action:    goproxy.ConnectMitm,
 		TLSConfig: goproxy.TLSConfigFromCA(ca),
 	}
-	goproxy.MitmConnect = &goproxy.ConnectAction{
-		Action:    goproxy.ConnectMitm,
-		TLSConfig: goproxy.TLSConfigFromCA(ca),
-	}
-
-	// 对所有 CONNECT 请求做 MITM
-	p.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	p.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+		return mitmAction, host
+	})
 
 	p.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		meta := &requestMeta{StartTime: time.Now()}
 		newBody, recordID, _ := handler.InterceptRequest(req)
 		if newBody != nil {
 			req.Body = io.NopCloser(bytes.NewReader(newBody))
 			req.ContentLength = int64(len(newBody))
 		}
-		ctx.UserData = recordID
+		meta.RecordID = recordID
+		ctx.UserData = meta
 		return req, nil
 	})
 
 	p.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		recordID, _ := ctx.UserData.(string)
+		meta, _ := ctx.UserData.(*requestMeta)
+		if meta == nil {
+			return resp
+		}
 		fields := GetReportingFields(configMgr.Get())
-		ExtractAndEnqueueUsage(resp, recordID, fields, rep)
+		ttfbMs := int(time.Since(meta.StartTime).Milliseconds())
+		ExtractAndEnqueueUsage(resp, meta.RecordID, fields, rep, ttfbMs, meta.StartTime)
 		return resp
 	})
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/cortex-io/cortex-proxy/instance"
 	"github.com/cortex-io/cortex-proxy/platform"
 	"github.com/cortex-io/cortex-proxy/proxy"
 	"github.com/cortex-io/cortex-proxy/reporter"
@@ -29,6 +30,8 @@ func RunStart(args []string) {
 	const defaultTimeoutMS = 3000
 	const defaultBatchSize = 10
 	const defaultFlushInterval = 5 * time.Second
+
+	instanceID := instance.LoadOrCreate()
 
 	client := platform.NewClient(*platformURL, *apiKey, defaultTimeoutMS)
 	cfgMgr := platform.NewConfigManager(client, 5*time.Minute)
@@ -52,14 +55,14 @@ func RunStart(args []string) {
 	go cfgMgr.Start(ctx)
 	go rep.Start(ctx)
 
-	proxyServer, err := proxy.NewProxyServer(client, cfgMgr, rep)
+	proxyServer, err := proxy.NewProxyServer(client, cfgMgr, rep, instanceID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	addr := fmt.Sprintf(":%d", *port)
-	fmt.Printf("cortex-proxy listening on %s\n", addr)
+	fmt.Printf("cortex-proxy listening on %s (instance=%s)\n", addr, instanceID[:8])
 	if err := http.ListenAndServe(addr, proxyServer); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)

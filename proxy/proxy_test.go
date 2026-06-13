@@ -26,7 +26,7 @@ func TestInterceptReplaceBody(t *testing.T) {
 
 	client := platform.NewClient(srv.URL, "test-key", 3000)
 	cfgMgr := platform.NewConfigManager(client, 5*time.Minute)
-	handler := proxy.NewHandler(client, cfgMgr)
+	handler := proxy.NewHandler(client, cfgMgr, "")
 
 	body := map[string]any{
 		"model":    "claude-3-5-sonnet-20241022",
@@ -57,7 +57,7 @@ func TestInterceptFallbackOnPlatformError(t *testing.T) {
 	// 平台不可达时，原样透传
 	client := platform.NewClient("http://127.0.0.1:1", "key", 100)
 	cfgMgr := platform.NewConfigManager(client, 5*time.Minute)
-	handler := proxy.NewHandler(client, cfgMgr)
+	handler := proxy.NewHandler(client, cfgMgr, "")
 
 	original := map[string]any{"model": "gpt-4o", "messages": []map[string]string{{"role": "user", "content": "hello"}}}
 	bodyBytes, _ := json.Marshal(original)

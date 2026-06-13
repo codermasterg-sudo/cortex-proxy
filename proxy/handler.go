@@ -11,12 +11,13 @@ import (
 )
 
 type Handler struct {
-	client    *platform.Client
-	configMgr *platform.ConfigManager
+	client     *platform.Client
+	configMgr  *platform.ConfigManager
+	instanceID string
 }
 
-func NewHandler(client *platform.Client, configMgr *platform.ConfigManager) *Handler {
-	return &Handler{client: client, configMgr: configMgr}
+func NewHandler(client *platform.Client, configMgr *platform.ConfigManager, instanceID string) *Handler {
+	return &Handler{client: client, configMgr: configMgr, instanceID: instanceID}
 }
 
 // InterceptRequest 拦截请求 body，调平台压缩，返回替换后的 body 和 record_id。
@@ -44,7 +45,7 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 	// 尽量获取 client agent：从 User-Agent 头提取，透传给平台
 	clientAgent := req.Header.Get("User-Agent")
 
-	result, err := h.client.Compress(req.Context(), rawBody, clientAgent)
+	result, err := h.client.Compress(req.Context(), rawBody, clientAgent, h.instanceID)
 	if err != nil {
 		return rawBody, "", nil // 降级：透传原始 body
 	}

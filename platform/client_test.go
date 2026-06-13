@@ -29,12 +29,33 @@ func TestCompress(t *testing.T) {
 	defer srv.Close()
 
 	c := platform.NewClient(srv.URL, "test-key", 3000)
-	result, err := c.Compress(context.Background(), []byte(`{"messages":[],"model":"gpt-4o"}`))
+	result, err := c.Compress(context.Background(), []byte(`{"messages":[],"model":"gpt-4o"}`), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.TokensBefore != 100 {
 		t.Errorf("expected 100, got %d", result.TokensBefore)
+	}
+}
+
+func TestCompressPassesInstanceIDHeader(t *testing.T) {
+	var gotInstanceID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInstanceID = r.Header.Get("X-Proxy-Instance-ID")
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":        []map[string]string{},
+			"tokens_before":   0,
+			"tokens_after":    0,
+			"record_id":       "00000000-0000-0000-0000-000000000001",
+			"has_ccr_markers": false,
+		})
+	}))
+	defer srv.Close()
+
+	c := platform.NewClient(srv.URL, "test-key", 3000)
+	c.Compress(context.Background(), []byte(`{"messages":[],"model":"gpt-4o"}`), "", "inst-abc")
+	if gotInstanceID != "inst-abc" {
+		t.Errorf("expected X-Proxy-Instance-ID=inst-abc, got %q", gotInstanceID)
 	}
 }
 
