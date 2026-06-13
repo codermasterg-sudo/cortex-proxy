@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,9 +11,9 @@ import (
 	"github.com/cortex-io/cortex-proxy/reporter"
 )
 
-// ExtractAndEnqueueUsage 从响应中提取 usage 字段并入队。
-// - 普通 JSON 响应：直接解析
-// - SSE 流式响应：逐行扫描 data: 事件，从最后一个含 usage 字段的 JSON 对象提取
+// ExtractAndEnqueueUsage 从响应中提取上报字段并入队。
+// - 普通 JSON 响应：直接解析，按 fields 提取
+// - SSE 流式响应：实时分叉，不阻塞 agent 接收流，goroutine 聚合字段后触发上报
 func ExtractAndEnqueueUsage(
 	resp *http.Response,
 	recordID string,
@@ -26,7 +25,7 @@ func ExtractAndEnqueueUsage(
 	}
 
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		extractFromSSE(resp, recordID, fields, rep)
+		tapSSEStream(resp, recordID, fields, rep)
 		return
 	}
 
@@ -34,98 +33,117 @@ func ExtractAndEnqueueUsage(
 	if err != nil {
 		return
 	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
+	// 还原 body 供下游读取
+	resp.Body = io.NopCloser(strings.NewReader(string(body)))
 
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return
 	}
-	usage := extractUsageFields(data, recordID, fields)
-	if len(usage) > 1 {
-		rep.Enqueue(usage)
+	collected := collectFields(data, recordID, fields)
+	if len(collected) > 1 {
+		rep.Enqueue(collected)
 	}
 }
 
-// extractFromSSE 读取 SSE 流，将所有 data: 行收集，再找含 usage 字段的最后一条 JSON 事件。
-// 读完后把完整 body 还原到 resp.Body，供 goproxy 透传给调用方。
-func extractFromSSE(
+// tapSSEStream 将 SSE body 实时分叉：
+//   - resp.Body 替换为透明的 teeReadCloser，goproxy 读取时同时写入 pipe
+//   - goroutine 从 pipe 读取，逐行解析 data: 事件，聚合配置字段
+//   - 遇到 [DONE] 或流结束时触发一次上报
+//
+// agent 接收流的延迟不受影响。
+func tapSSEStream(
 	resp *http.Response,
 	recordID string,
 	fields []string,
 	rep *reporter.Reporter,
 ) {
-	// 用 TeeReader 同时读取 + 保留原始字节，保证 resp.Body 可被下游读取
-	var buf bytes.Buffer
-	tee := io.TeeReader(resp.Body, &buf)
+	pr, pw := io.Pipe()
 
-	var lastUsage map[string]any
-
-	scanner := bufio.NewScanner(tee)
-	// SSE 行最长 64KB（包含大 JSON 对象时可能更长，保守使用 128KB）
-	scanner.Buffer(make([]byte, 128*1024), 128*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-
-		var event map[string]any
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			// 非 JSON 或不完整 chunk，跳过
-			continue
-		}
-
-		// 检查顶层或嵌套 usage 对象是否含有目标字段
-		if containsUsageFields(event, fields) {
-			lastUsage = event
-		}
+	orig := resp.Body
+	resp.Body = &teeReadCloser{
+		r:    io.TeeReader(orig, pw),
+		pw:   pw,
+		orig: orig,
 	}
-	// scanner 读完后 buf 中已有完整数据
-	resp.Body = io.NopCloser(&buf)
 
-	if lastUsage != nil {
-		usage := extractUsageFields(lastUsage, recordID, fields)
-		if len(usage) > 1 {
-			rep.Enqueue(usage)
-		}
-	}
-}
+	go func() {
+		defer pr.Close()
 
-// containsUsageFields 检查 data map 中（顶层或 usage 子对象）是否有任何目标字段。
-func containsUsageFields(data map[string]any, fields []string) bool {
-	nested, _ := data["usage"].(map[string]any)
-	for _, field := range fields {
-		if _, ok := data[field]; ok {
-			return true
-		}
-		if nested != nil {
-			if _, ok := nested[field]; ok {
-				return true
+		// 聚合：从所有事件中收集目标字段，后出现的值覆盖前面的
+		// 这样可以跨多个 SSE 事件聚合（如 Anthropic 的 input tokens 在 message_start，
+		// output tokens 在 message_delta）
+		collected := map[string]any{"record_id": recordID}
+
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 128*1024), 128*1024)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data:") {
+				continue
 			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				break
+			}
+			if payload == "" {
+				continue
+			}
+
+			var event map[string]any
+			if err := json.Unmarshal([]byte(payload), &event); err != nil {
+				// 非 JSON 或不完整 chunk，跳过继续扫描
+				continue
+			}
+
+			// 按 fields 配置从当前事件提取字段，合并到 collected
+			mergeFields(collected, event, fields)
 		}
-	}
-	return false
+
+		// [DONE] 或流自然结束后，只要有至少一个目标字段就上报
+		if len(collected) > 1 {
+			rep.Enqueue(collected)
+		}
+	}()
 }
 
-// extractUsageFields 从 data 中按 fields 列表提取值，优先顶层再查 usage 嵌套对象。
-func extractUsageFields(data map[string]any, recordID string, fields []string) map[string]any {
-	usage := map[string]any{"record_id": recordID}
-	nested, _ := data["usage"].(map[string]any)
+// teeReadCloser 包装原始 body：Read 时同步写入 pipe，Close 时关闭 pipe 通知消费 goroutine。
+type teeReadCloser struct {
+	r    io.Reader      // TeeReader(orig, pw)
+	pw   *io.PipeWriter // 写端，Close 时关闭以通知消费方 EOF
+	orig io.ReadCloser  // 原始 body
+}
+
+func (t *teeReadCloser) Read(p []byte) (int, error) {
+	return t.r.Read(p)
+}
+
+func (t *teeReadCloser) Close() error {
+	t.pw.Close() // 让 goroutine 的 scanner 收到 EOF
+	return t.orig.Close()
+}
+
+// mergeFields 从 event（及其 usage 子对象）中提取 fields 配置的字段，写入 dst。
+// 后调用的值覆盖先前的——跨多个 SSE 事件聚合时，越晚的事件越权威。
+func mergeFields(dst map[string]any, event map[string]any, fields []string) {
+	nested, _ := event["usage"].(map[string]any)
 	for _, field := range fields {
-		if v, ok := data[field]; ok {
-			usage[field] = v
+		if v, ok := event[field]; ok {
+			dst[field] = v
 		} else if nested != nil {
 			if v, ok := nested[field]; ok {
-				usage[field] = v
+				dst[field] = v
 			}
 		}
 	}
-	return usage
+}
+
+// collectFields 从单个 JSON 响应中按 fields 提取，返回含 record_id 的 map。
+func collectFields(data map[string]any, recordID string, fields []string) map[string]any {
+	result := map[string]any{"record_id": recordID}
+	mergeFields(result, data, fields)
+	return result
 }
 
 // DefaultReportingFields 当配置未加载时的兜底字段列表
