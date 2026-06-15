@@ -2,87 +2,166 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
+	"net/url"
+	"strings"
 	"time"
 
-	"github.com/cortex-io/cortex-proxy/cert"
+	"github.com/cortex-io/cortex-proxy/config"
 	"github.com/cortex-io/cortex-proxy/platform"
 	"github.com/cortex-io/cortex-proxy/reporter"
-	"github.com/elazarl/goproxy"
 )
 
-// requestMeta 保存每个请求的上下文信息，通过 ctx.UserData 传递
-type requestMeta struct {
-	RecordID  string
-	StartTime time.Time
+// Server is an HTTP reverse proxy that compresses LLM requests via the Cortex platform.
+// Agents point OPENAI_BASE_URL (or equivalent) at this server's HTTP address.
+// No TLS certificates required — the agent communicates with the proxy over plain HTTP,
+// while the proxy connects to the upstream LLM over HTTPS.
+type Server struct {
+	handler   *Handler
+	configMgr *platform.ConfigManager
+	reporter  *reporter.Reporter
+	upstream  config.UpstreamConfig
+	client    *http.Client
 }
 
-func LoadCA() (*tls.Certificate, error) {
-	cfgDir, err := os.UserConfigDir()
-	if err != nil {
-		return nil, fmt.Errorf("cannot determine user config dir: %w", err)
-	}
-	certPath := filepath.Join(cfgDir, "cortex-proxy", "ca.crt")
-	keyPath := filepath.Join(cfgDir, "cortex-proxy", "ca.key")
-	ca, err := tls.LoadX509KeyPair(certPath, keyPath)
-	if err != nil {
-		return nil, err
-	}
-	ca.Leaf, _ = cert.ParseLeaf(ca.Certificate[0])
-	return &ca, nil
-}
-
-func NewProxyServer(
-	client *platform.Client,
+func NewServer(
+	platformClient *platform.Client,
 	configMgr *platform.ConfigManager,
 	rep *reporter.Reporter,
 	instanceID string,
-) (*goproxy.ProxyHttpServer, error) {
-	ca, err := LoadCA()
+	upstream config.UpstreamConfig,
+) *Server {
+	return &Server{
+		handler:   NewHandler(platformClient, configMgr, instanceID),
+		configMgr: configMgr,
+		reporter:  rep,
+		upstream:  upstream,
+		// No global timeout: individual requests use context deadlines set by the caller.
+		client: &http.Client{Transport: &http.Transport{}},
+	}
+}
+
+// hopByHop lists headers that must not be forwarded between proxy and upstream.
+var hopByHop = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	logDebug("[REQ] %s %s (Content-Type: %s)", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+
+	// Compress body via platform (reads + resets r.Body internally).
+	newBody, recordID, _ := s.handler.InterceptRequest(r)
+
+	// Build target URL: upstream base URL + incoming request path + query string.
+	targetStr, err := buildTargetURL(s.upstream.BaseURL, r.URL)
 	if err != nil {
-		return nil, fmt.Errorf("CA not found — run `cortex-proxy install` first: %w", err)
+		logWarn("[PROXY] invalid upstream URL: %v", err)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+	logDebug("[FORWARD] → %s", targetStr)
+
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetStr, bytes.NewReader(newBody))
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	upstreamReq.ContentLength = int64(len(newBody))
+
+	// Forward all headers except hop-by-hop.
+	for k, vv := range r.Header {
+		if hopByHop[k] {
+			continue
+		}
+		for _, v := range vv {
+			upstreamReq.Header.Add(k, v)
+		}
 	}
 
-	handler := NewHandler(client, configMgr, instanceID)
-	p := goproxy.NewProxyHttpServer()
-	p.Verbose = false
-
-	// 实例级 MITM 配置：通过 FuncHttpsHandler 避免覆写 goproxy 全局变量
-	mitmAction := &goproxy.ConnectAction{
-		Action:    goproxy.ConnectMitm,
-		TLSConfig: goproxy.TLSConfigFromCA(ca),
+	// Override Authorization header if upstream key is configured in config file.
+	// Otherwise the agent's own Authorization header is forwarded unchanged.
+	if s.upstream.APIKey != "" {
+		upstreamReq.Header.Set("Authorization", "Bearer "+s.upstream.APIKey)
 	}
-	p.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		return mitmAction, host
-	})
 
-	p.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		meta := &requestMeta{StartTime: time.Now()}
-		newBody, recordID, _ := handler.InterceptRequest(req)
-		if newBody != nil {
-			req.Body = io.NopCloser(bytes.NewReader(newBody))
-			req.ContentLength = int64(len(newBody))
+	// Set Host to the upstream host, not localhost.
+	parsed, _ := url.Parse(targetStr)
+	upstreamReq.Host = parsed.Host
+
+	resp, err := s.client.Do(upstreamReq)
+	if err != nil {
+		logWarn("[PROXY] upstream error: %v", err)
+		http.Error(w, "bad gateway: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	ttfbMs := int(time.Since(start).Milliseconds())
+	logDebug("[RESP] %d (record=%s, ttfb=%dms)", resp.StatusCode, recordID, ttfbMs)
+
+	// Forward response headers.
+	for k, vv := range resp.Header {
+		if hopByHop[k] {
+			continue
 		}
-		meta.RecordID = recordID
-		ctx.UserData = meta
-		return req, nil
-	})
-
-	p.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		meta, _ := ctx.UserData.(*requestMeta)
-		if meta == nil {
-			return resp
+		for _, v := range vv {
+			w.Header().Add(k, v)
 		}
-		fields := GetReportingFields(configMgr.Get())
-		ttfbMs := int(time.Since(meta.StartTime).Milliseconds())
-		ExtractAndEnqueueUsage(resp, meta.RecordID, fields, rep, ttfbMs, meta.StartTime)
-		return resp
-	})
+	}
+	w.WriteHeader(resp.StatusCode)
 
-	return p, nil
+	// Side-channel usage extraction, then stream body to agent.
+	// ExtractAndEnqueueUsage wraps resp.Body (SSE) or resets it (JSON) before the copy.
+	fields := GetReportingFields(s.configMgr.Get())
+	ExtractAndEnqueueUsage(resp, recordID, fields, s.reporter, ttfbMs, start)
+	io.Copy(&flushWriter{w}, resp.Body)
+}
+
+// buildTargetURL builds the upstream request URL from the configured base and the incoming path.
+//
+// Overlap deduplication: if the upstream path is already a prefix of the request path,
+// it is not doubled. This handles the common case where upstream.base_url includes "/v1"
+// and the agent SDK also sends paths starting with "/v1".
+//
+//	upstream "https://www.packyapi.com/v1" + req "/v1/chat/completions"
+//	  → "https://www.packyapi.com/v1/chat/completions"   (no double /v1)
+//
+//	upstream "https://api.openai.com" + req "/v1/chat/completions"
+//	  → "https://api.openai.com/v1/chat/completions"
+func buildTargetURL(upstream string, reqURL *url.URL) (string, error) {
+	u, err := url.Parse(upstream)
+	if err != nil {
+		return "", fmt.Errorf("parse upstream %q: %w", upstream, err)
+	}
+	base := strings.TrimRight(u.Path, "/")
+	req := reqURL.Path
+	if base != "" && strings.HasPrefix(req, base+"/") {
+		u.Path = req
+	} else {
+		u.Path = base + req
+	}
+	u.RawQuery = reqURL.RawQuery
+	return u.String(), nil
+}
+
+// flushWriter wraps ResponseWriter and flushes after every write, which is required
+// for SSE (server-sent events) streaming to reach the client incrementally.
+type flushWriter struct{ http.ResponseWriter }
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.ResponseWriter.Write(p)
+	if f, ok := fw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
 }

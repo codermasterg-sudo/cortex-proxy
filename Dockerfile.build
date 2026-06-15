@@ -1,0 +1,38 @@
+FROM golang:1.22-alpine AS builder
+
+# 设置国内 Go Modules 源
+ENV GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+ENV GOSUMDB=sum.golang.google.cn
+
+WORKDIR /app
+
+# 复制 go.mod 和 go.sum
+COPY go.mod go.sum ./
+
+# 下载依赖
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 编译
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-X main.version=dev" -o /app/cortex-proxy .
+
+# 运行镜像
+FROM alpine:latest AS base
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+# 从 builder 复制二进制
+COPY --from=builder /app/cortex-proxy /usr/local/bin/cortex-proxy
+
+# 创建配置目录
+RUN mkdir -p /root/.config/cortex-proxy
+
+EXPOSE 7898
+
+ENTRYPOINT ["/usr/local/bin/cortex-proxy"]
+CMD ["start"]

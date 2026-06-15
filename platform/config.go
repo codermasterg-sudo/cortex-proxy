@@ -27,9 +27,20 @@ func (m *ConfigManager) OnRefresh(fn OnConfigRefreshed) {
 	m.onRefresh = append(m.onRefresh, fn)
 }
 
-// SyncRefresh 同步执行一次配置拉取，用于启动时尽早获得平台配置。
-func (m *ConfigManager) SyncRefresh(ctx context.Context) {
-	m.refresh(ctx)
+// SyncRefresh 同步执行一次配置拉取，用于启动时尽早获得平台配置。返回拉取错误（不影响运行）。
+func (m *ConfigManager) SyncRefresh(ctx context.Context) error {
+	cfg, err := m.client.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.current = cfg
+	callbacks := m.onRefresh
+	m.mu.Unlock()
+	for _, fn := range callbacks {
+		fn(cfg)
+	}
+	return nil
 }
 
 func (m *ConfigManager) Start(ctx context.Context) {

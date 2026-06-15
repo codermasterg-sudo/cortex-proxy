@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  # 多平台编译服务
+  builder:
+    image: golang:1.22-alpine
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - go_cache:/go/pkg/mod  # 使用命名卷缓存
+    environment:
+      CGO_ENABLED: 0
+      GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
+      GOSUMDB: sum.golang.google.cn
+    command: |
+      sh -c "
+        echo '📦 构建 cortex-proxy...'
+        go mod download &&
+        echo '✓ 依赖已下载' &&
+
+        echo '🔨 编译本地二进制...' &&
+        go build -ldflags='-X main.version=dev' -o cortex-proxy . &&
+        echo '✓ 本地二进制: ./cortex-proxy' &&
+
+        echo '🔨 编译 Linux 64bit...' &&
+        GOOS=linux GOARCH=amd64 go build -ldflags='-X main.version=dev' -o dist/cortex-proxy-linux-amd64 . &&
+        echo '✓ Linux 64bit: dist/cortex-proxy-linux-amd64' &&
+
+        echo '🔨 编译 macOS Intel...' &&
+        GOOS=darwin GOARCH=amd64 go build -ldflags='-X main.version=dev' -o dist/cortex-proxy-darwin-amd64 . &&
+        echo '✓ macOS Intel: dist/cortex-proxy-darwin-amd64' &&
+
+        echo '🔨 编译 macOS Apple Silicon...' &&
+        GOOS=darwin GOARCH=arm64 go build -ldflags='-X main.version=dev' -o dist/cortex-proxy-darwin-arm64 . &&
+        echo '✓ macOS ARM64: dist/cortex-proxy-darwin-arm64' &&
+
+        echo '🔨 编译 Windows 64bit...' &&
+        GOOS=windows GOARCH=amd64 go build -ldflags='-X main.version=dev' -o dist/cortex-proxy-windows-amd64.exe . &&
+        echo '✓ Windows 64bit: dist/cortex-proxy-windows-amd64.exe' &&
+
+        echo '✅ 编译完成！'
+      "
+
+  # 运行时镜像
+  runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+      target: base
+    image: cortex-proxy:dev
+    container_name: cortex-proxy-dev
+    ports:
+      - "7898:7898"
+    environment:
+      CORTEX_API_KEY: "${CORTEX_API_KEY:-test-key}"
+      CORTEX_PLATFORM_URL: "${CORTEX_PLATFORM_URL:-http://host.docker.internal:8000}"
+    command: start
+    profiles:
+      - runtime
+
+volumes:
+  go_cache:

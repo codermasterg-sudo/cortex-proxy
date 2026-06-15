@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"time"
 
 	"github.com/cortex-io/cortex-proxy/platform"
 )
@@ -24,31 +25,43 @@ func NewHandler(client *platform.Client, configMgr *platform.ConfigManager, inst
 // 如果平台不可用或压缩禁用，返回原始 body。
 // 安全保证：只把 request body（messages/model 等）发给 /v1/compress，不传原始 Authorization header。
 func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID string, err error) {
-	cfg := h.configMgr.Get()
-	if cfg != nil && !cfg.Compression.Enabled {
-		return nil, "", nil
-	}
-	// cfg == nil 表示配置尚未加载，默认启用压缩（内置 default）
-
 	rawBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, "", err
 	}
 	req.Body = io.NopCloser(bytes.NewReader(rawBody))
 
-	// 只压缩 application/json（LLM API 请求），用 mime.ParseMediaType 剥离 charset 等参数
-	mediaType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
+	cfg := h.configMgr.Get()
+	if cfg != nil && !cfg.Compression.Enabled {
+		logDebug("[SKIP] compression disabled by config, passthrough %s %s", req.Method, req.Host)
 		return rawBody, "", nil
 	}
 
-	// 尽量获取 client agent：从 User-Agent 头提取，透传给平台
-	clientAgent := req.Header.Get("User-Agent")
-
-	result, err := h.client.Compress(req.Context(), rawBody, clientAgent, h.instanceID)
-	if err != nil {
-		return rawBody, "", nil // 降级：透传原始 body
+	// 只压缩 application/json（LLM API 请求），用 mime.ParseMediaType 剥离 charset 等参数
+	mediaType, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		logDebug("[SKIP] non-JSON content-type (%q), passthrough %s %s", req.Header.Get("Content-Type"), req.Method, req.Host)
+		return rawBody, "", nil
 	}
+
+	clientAgent := req.Header.Get("User-Agent")
+	logDebug("[COMPRESS] calling platform for %s %s%s (%d bytes)", req.Method, req.Host, req.URL.Path, len(rawBody))
+
+	start := time.Now()
+	result, err := h.client.Compress(req.Context(), rawBody, clientAgent, h.instanceID)
+	elapsed := time.Since(start).Milliseconds()
+
+	if err != nil {
+		logWarn("[COMPRESS] platform error for %s %s: %v (passthrough, %.0fms)", req.Method, req.Host, err, float64(elapsed))
+		return rawBody, "", nil
+	}
+
+	ratio := 0.0
+	if result.TokensBefore > 0 {
+		ratio = 1.0 - float64(result.TokensAfter)/float64(result.TokensBefore)
+	}
+	logInfo("[COMPRESS] %s: %d→%d tokens (saved=%.0f%%, %dms) record=%s",
+		req.Host, result.TokensBefore, result.TokensAfter, ratio*100, elapsed, result.RecordID)
 
 	// 重组 body：用 json.RawMessage 保留所有原始字段的字节表示，只替换 messages。
 	// 避免 map[string]any 的 float64 中转导致大整数精度丢失或格式变化。
