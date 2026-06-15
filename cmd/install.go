@@ -26,24 +26,38 @@ func RunInstall(args []string) {
 	}
 
 	template := `# cortex-proxy configuration
+# All values here can be overridden by CLI flags or environment variables.
+# Priority: CLI flag > environment variable > this file > built-in default.
+
+listen:
+  # Network interface to bind. Leave empty to listen on all interfaces (0.0.0.0).
+  # CLI: --host=127.0.0.1
+  host: ""
+
+  # TCP port to listen on. Default: 7898.
+  # CLI: --port=7898
+  port: 7898
 
 cortex:
   # Cortex platform API key (ctxp_sk_...).
-  # Can also be set via --api-key flag or CORTEX_API_KEY env var (higher priority).
+  # CLI: --api-key=ctxp_sk_...   env: CORTEX_API_KEY
   api_key: ""
 
   # Cortex platform URL. Leave empty to use the default (https://api.cortex.io).
   # For local development: http://localhost:8000
+  # CLI: --platform=https://api.cortex.io   env: CORTEX_PLATFORM_URL
   platform_url: ""
 
 upstream:
   # LLM provider base URL.
   # The proxy appends the incoming request path (/v1/chat/completions, etc.) to this.
+  # CLI: --upstream-url=https://api.openai.com   env: CORTEX_UPSTREAM_URL
   base_url: "https://api.openai.com"
 
   # LLM API key (optional).
   # If set, this key replaces the Authorization header forwarded to the upstream.
   # If left empty, the agent's own Authorization header is passed through unchanged.
+  # CLI: --upstream-key=sk-...   env: CORTEX_UPSTREAM_KEY
   api_key: ""
 `
 

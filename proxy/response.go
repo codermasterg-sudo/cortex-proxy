@@ -45,10 +45,13 @@ func ExtractAndEnqueueUsage(
 	if err := json.Unmarshal(body, &data); err != nil {
 		return
 	}
+	logDebug("[JSON] extracting usage record=%s", recordID)
 	collected := collectFields(data, recordID, fields)
 	collected["ttfb_ms"] = ttfbMs
 	collected["total_latency_ms"] = int(time.Since(startTime).Milliseconds())
+	logDebug("[JSON] collected %d fields record=%s payload=%v", len(collected), recordID, collected)
 	if len(collected) > 1 {
+		logDebug("[JSON] enqueuing usage record=%s", recordID)
 		rep.Enqueue(collected)
 	}
 }
@@ -66,6 +69,8 @@ func tapSSEStream(
 	ttfbMs int,
 	startTime time.Time,
 ) {
+	logDebug("[SSE] tapSSEStream enter record=%s", recordID)
+
 	// 64 行缓冲足以覆盖正常 SSE 流的突发写入；消费方落后时丢弃而非阻塞。
 	lineCh := make(chan string, 64)
 
@@ -79,6 +84,7 @@ func tapSSEStream(
 			}
 		}()
 
+		logDebug("[SSE] consumer goroutine started record=%s", recordID)
 		collected := map[string]any{"record_id": recordID}
 
 		for line := range lineCh {
@@ -93,12 +99,18 @@ func tapSSEStream(
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
 				continue
 			}
+			before := len(collected)
 			mergeFields(collected, event, fields)
+			if len(collected) > before {
+				logDebug("[SSE] mergeFields added %d fields from event record=%s", len(collected)-before, recordID)
+			}
 		}
 
 		collected["ttfb_ms"] = ttfbMs
 		collected["total_latency_ms"] = int(time.Since(startTime).Milliseconds())
+		logDebug("[SSE] consumer goroutine finished record=%s fields=%d", recordID, len(collected))
 		if len(collected) > 1 {
+			logDebug("[SSE] enqueuing usage record=%s", recordID)
 			rep.Enqueue(collected)
 		}
 	}()
@@ -140,6 +152,7 @@ func (s *sseReadCloser) scanLines(data []byte) {
 }
 
 func (s *sseReadCloser) Close() error {
+	logDebug("[SSE] sseReadCloser.Close() called, closing lineCh")
 	err := s.orig.Close()
 	close(s.lineCh) // 通知消费 goroutine 退出
 	return err
@@ -147,8 +160,14 @@ func (s *sseReadCloser) Close() error {
 
 // mergeFields 从 event（及其 usage 子对象）中提取 fields 配置的字段，写入 dst。
 // 后调用的值覆盖先前的——跨多个 SSE 事件聚合时，越晚的事件越权威。
+// 同时始终将完整的 usage 子对象写入 dst["usage"]，供服务端做字段名适配。
 func mergeFields(dst map[string]any, event map[string]any, fields []string) {
 	nested, _ := event["usage"].(map[string]any)
+	// 始终透传完整 usage 对象，服务端可自行处理字段名差异（如 prompt_cache_hit_tokens）
+	if nested != nil {
+		dst["usage"] = nested
+		logDebug("[mergeFields] usage sub-object has %d fields", len(nested))
+	}
 	for _, field := range fields {
 		if v, ok := event[field]; ok {
 			dst[field] = v

@@ -71,7 +71,12 @@ func (c *Client) UpdateCompressTimeout(timeoutMS int) {
 // 压缩超时从 compressTimeoutMS 动态读取，可通过 UpdateCompressTimeout 实时调整。
 func (c *Client) Compress(ctx context.Context, rawBody []byte, clientAgent string, instanceID string) (*CompressResult, error) {
 	timeoutMS := c.compressTimeoutMS.Load()
-	compressCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+	// Use context.Background() instead of the caller's ctx so that the compress
+	// API call gets its own independent timeout. The caller's ctx (e.g., an
+	// incoming HTTP request context) may already have a deadline that is too
+	// short or already exceeded, which would cause the compress call to fail
+	// immediately with "context deadline exceeded".
+	compressCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(compressCtx, http.MethodPost, c.baseURL+"/v1/compress", bytes.NewReader(rawBody))

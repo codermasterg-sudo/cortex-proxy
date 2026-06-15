@@ -104,7 +104,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad gateway: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	// 使用闭包而非 resp.Body.Close()，确保 defer 执行时读取 resp.Body 的当前值。
+	// ExtractAndEnqueueUsage 在 SSE 场景下会将 resp.Body 替换为 sseReadCloser；
+	// 若直接写 defer resp.Body.Close()，Go 会在 defer 注册时就求值方法接收者，
+	// 捕获原始 body，导致 sseReadCloser.Close() 永远不被调用、lineCh 永远不关闭、
+	// 消费 goroutine 永久泄漏，SSE usage 数据无法上报。
+	defer func() { resp.Body.Close() }()
 
 	ttfbMs := int(time.Since(start).Milliseconds())
 	logDebug("[RESP] %d (record=%s, ttfb=%dms)", resp.StatusCode, recordID, ttfbMs)

@@ -9,8 +9,19 @@ import (
 )
 
 type Config struct {
+	Listen   ListenConfig   `yaml:"listen"`
 	Upstream UpstreamConfig `yaml:"upstream"`
 	Cortex   CortexConfig   `yaml:"cortex"`
+}
+
+type ListenConfig struct {
+	// Host is the network interface to bind. Empty string means all interfaces (0.0.0.0).
+	// Can also be set via --host flag (higher priority).
+	Host string `yaml:"host"`
+
+	// Port is the TCP port to listen on. 0 means use the default (7898).
+	// Can also be set via --port flag (higher priority).
+	Port int `yaml:"port"`
 }
 
 type UpstreamConfig struct {
