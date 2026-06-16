@@ -71,8 +71,8 @@ func tapSSEStream(
 ) {
 	logDebug("[SSE] tapSSEStream enter record=%s", recordID)
 
-	// 64 行缓冲足以覆盖正常 SSE 流的突发写入；消费方落后时丢弃而非阻塞。
-	lineCh := make(chan string, 64)
+	// 512 行缓冲覆盖高吞吐 SSE 流（~10s 的突发），消费方落后时才丢弃，减少 usage 丢失
+	lineCh := make(chan string, 512)
 
 	orig := resp.Body
 	resp.Body = &sseReadCloser{orig: orig, lineCh: lineCh}

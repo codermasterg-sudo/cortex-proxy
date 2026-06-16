@@ -11,7 +11,7 @@ import (
 )
 
 const flushHTTPTimeout = 1 * time.Second
-const maxRetries = 3
+const maxRetries = 5 // 从 3 增加到 5，增强重试覆盖
 
 type Reporter struct {
 	platformURL string
@@ -119,7 +119,9 @@ func (r *Reporter) flush() {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*200) * time.Millisecond)
+			// 指数退避：100ms, 200ms, 400ms, 800ms, 1600ms
+			backoff := time.Duration(100<<uint(attempt-1)) * time.Millisecond
+			time.Sleep(backoff)
 		}
 		req, err := http.NewRequest(http.MethodPost, r.platformURL+"/v1/internal/report", bytes.NewReader(payload))
 		if err != nil {
