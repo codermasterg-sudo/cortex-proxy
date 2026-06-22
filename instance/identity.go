@@ -37,9 +37,9 @@ func LoadOrCreate() string {
 }
 
 func instanceIDPath() (string, error) {
-	cfgDir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(cfgDir, "cortex", "instance-id"), nil
+	return filepath.Join(home, ".cortex-proxy", "instance-id"), nil
 }

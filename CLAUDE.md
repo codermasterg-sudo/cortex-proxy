@@ -72,10 +72,11 @@ make lint
 cortex-proxy install
 ```
 
-生成配置文件（路径因系统而异）：
-- **macOS：** `~/Library/Application Support/cortex-proxy/config.json`
-- **Linux：** `~/.config/cortex-proxy/config.json`（遵循 `$XDG_CONFIG_HOME`）
-- **Windows：** `%AppData%\cortex-proxy\config.json`
+生成配置文件，所有平台统一存放在用户主目录下的 `.cortex-proxy` 文件夹：
+- **macOS/Linux：** `~/.cortex-proxy/config.yaml`
+- **Windows：** `C:\Users\<用户名>\.cortex-proxy\config.yaml`
+
+实例 ID 同样存放在该目录：`~/.cortex-proxy/instance-id`
 
 ### 2. 编辑配置
 

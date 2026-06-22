@@ -44,13 +44,15 @@ type CortexConfig struct {
 	PlatformURL string `yaml:"platform_url"`
 }
 
-// DefaultPath returns the config file path: ~/cortex-proxy/config.yaml
+// DefaultPath returns the config file path: ~/.cortex-proxy/config.yaml
+// On all platforms (macOS/Linux/Windows) the directory is a dot-prefixed folder
+// under the user's home directory, e.g. C:\Users\alice\.cortex-proxy on Windows.
 func DefaultPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
-	return filepath.Join(home, "cortex-proxy", "config.yaml")
+	return filepath.Join(home, ".cortex-proxy", "config.yaml")
 }
 
 // Load reads the config file at path. Returns an empty Config (not an error)
