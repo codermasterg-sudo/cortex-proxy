@@ -11,11 +11,12 @@ import (
 )
 
 type CompressResult struct {
-	Messages      []map[string]any `json:"messages"`
-	TokensBefore  int              `json:"tokens_before"`
-	TokensAfter   int              `json:"tokens_after"`
-	RecordID      string           `json:"record_id"`
-	HasCCRMarkers bool             `json:"has_ccr_markers"`
+	// json.RawMessage 保留平台返回的 messages 原始字节，避免 Go map 按字母序重新序列化打乱 key 顺序。
+	Messages      json.RawMessage `json:"messages"`
+	TokensBefore  int             `json:"tokens_before"`
+	TokensAfter   int             `json:"tokens_after"`
+	RecordID      string          `json:"record_id"`
+	HasCCRMarkers bool            `json:"has_ccr_markers"`
 }
 
 type ReportingConfig struct {
