@@ -8,22 +8,76 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+          cache: true
 
-      - name: Build all platforms
+      - name: Build binaries (all platforms)
         run: |
           mkdir -p dist
           VERSION=${GITHUB_REF_NAME}
-          GOOS=darwin  GOARCH=amd64 go build -ldflags="-X main.version=${VERSION}" -o dist/cortex-proxy-darwin-amd64 .
-          GOOS=darwin  GOARCH=arm64 go build -ldflags="-X main.version=${VERSION}" -o dist/cortex-proxy-darwin-arm64 .
-          GOOS=linux   GOARCH=amd64 go build -ldflags="-X main.version=${VERSION}" -o dist/cortex-proxy-linux-amd64 .
-          GOOS=windows GOARCH=amd64 go build -ldflags="-X main.version=${VERSION}" -o dist/cortex-proxy-windows-amd64.exe .
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+
+          GOOS=darwin  GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/cortex-proxy-darwin-amd64        .
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o dist/cortex-proxy-darwin-arm64        .
+          GOOS=linux   GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/cortex-proxy-linux-amd64         .
+          GOOS=linux   GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o dist/cortex-proxy-linux-arm64         .
+          GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/cortex-proxy-windows-amd64.exe   .
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum cortex-proxy-* > checksums.txt
+          echo "--- checksums ---"
+          cat checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## 下载说明
+
+            根据操作系统和 CPU 架构选择对应的二进制文件：
+
+            | 文件 | 系统 | 架构 |
+            |------|------|------|
+            | `cortex-proxy-darwin-amd64` | macOS | Intel |
+            | `cortex-proxy-darwin-arm64` | macOS | Apple Silicon (M1/M2/M3) |
+            | `cortex-proxy-linux-amd64` | Linux | x86_64 |
+            | `cortex-proxy-linux-arm64` | Linux | ARM64 / 树莓派 |
+            | `cortex-proxy-windows-amd64.exe` | Windows | x86_64 |
+
+            文件完整性校验见 `checksums.txt`（SHA-256）。
+
+            > GitHub 会自动附加 `Source code (zip/tar.gz)`，这是平台默认行为，不含额外内容，可忽略。
+
+            ## 快速开始
+
+            ```bash
+            # 1. 下载对应平台的二进制，重命名为 cortex-proxy 并加执行权限（macOS/Linux）
+            chmod +x cortex-proxy-linux-amd64 && mv cortex-proxy-linux-amd64 cortex-proxy
+
+            # 2. 初始化配置
+            ./cortex-proxy install
+
+            # 3. 启动
+            ./cortex-proxy start --api-key=ctxp_sk_xxx --upstream-url=https://api.openai.com
+
+            # 4. Agent 指向代理
+            export OPENAI_BASE_URL=http://localhost:7898
+            ```
+          files: |
+            dist/cortex-proxy-darwin-amd64
+            dist/cortex-proxy-darwin-arm64
+            dist/cortex-proxy-linux-amd64
+            dist/cortex-proxy-linux-arm64
+            dist/cortex-proxy-windows-amd64.exe
+            dist/checksums.txt
