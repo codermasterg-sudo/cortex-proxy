@@ -64,13 +64,10 @@ func (h *Handler) InterceptRequest(req *http.Request) (newBody []byte, recordID 
 	logInfo("[COMPRESS] %s: %d→%d tokens (saved=%.0f%%, %dms) record=%s",
 		req.Host, result.TokensBefore, result.TokensAfter, ratio*100, elapsed, result.RecordID)
 
-	// 未发生实际压缩：直接透传原始 body，不修改任何字节。
-	if result.TokensBefore == result.TokensAfter {
-		return rawBody, result.RecordID, nil
-	}
-
 	// 原地字节替换：只替换原始 body 中 "messages" 字段的值，其余字节一个不动。
 	// result.Messages 是 json.RawMessage，保留平台返回的原始字节序，不做二次 Marshal。
+	// 即使 tokens 数量未变（如仅做了格式归一化），也统一走替换路径，
+	// 保证每次请求的 messages 格式一致，维持 LLM KV cache 跨请求命中率。
 	newBodyBytes, err := replaceMessagesField(rawBody, result.Messages)
 	if err != nil {
 		logWarn("[COMPRESS] replaceMessagesField failed: %v, passthrough", err)

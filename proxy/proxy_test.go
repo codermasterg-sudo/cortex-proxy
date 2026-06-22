@@ -53,17 +53,13 @@ func TestInterceptReplaceBody(t *testing.T) {
 	}
 }
 
-// TestInterceptNoCompression 验证 tokens 未变化时直接透传 rawBody，不修改任何字节。
+// TestInterceptNoCompression 验证 tokens 未变化时仍然做 messages 替换，
+// 保证格式一致性（如平台做了空格归一化），维持跨请求 KV cache 命中率。
 func TestInterceptNoCompression(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 平台返回 tokens_before == tokens_after，messages 字段 key 顺序刻意与原始不同
-		json.NewEncoder(w).Encode(map[string]any{
-			"messages":        []map[string]string{{"content": "hello", "role": "user"}}, // 字母序
-			"tokens_before":   42,
-			"tokens_after":    42, // 未压缩
-			"record_id":       "rec-noop",
-			"has_ccr_markers": false,
-		})
+		// 平台返回格式归一化后的 messages（去掉了空格），tokens 数量不变
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"messages":[{"role":"user","content":"hello"}],"tokens_before":42,"tokens_after":42,"record_id":"rec-noop","has_ccr_markers":false}`))
 	}))
 	defer srv.Close()
 
@@ -71,18 +67,23 @@ func TestInterceptNoCompression(t *testing.T) {
 	cfgMgr := platform.NewConfigManager(client, 5*time.Minute)
 	handler := proxy.NewHandler(client, cfgMgr, "")
 
-	// rawBody 字段顺序：role 在前，content 在后
-	rawBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	// rawBody 带空格（模拟 SDK 请求）
+	rawBody := []byte(`{"model":"gpt-4o","messages":[{"role": "user", "content": "hello"}],"stream":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(rawBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	newBody, recordID, _ := handler.InterceptRequest(req)
 
-	if string(newBody) != string(rawBody) {
-		t.Errorf("no-compression: body should be rawBody unchanged\n  want: %s\n  got:  %s", rawBody, newBody)
+	// messages 应被平台返回的紧凑格式替换（保证后续请求格式一致）
+	if bytes.Contains(newBody, []byte(`"role": "user"`)) {
+		t.Error("messages should be replaced with platform output (compact), not original with spaces")
 	}
 	if recordID != "rec-noop" {
 		t.Errorf("expected rec-noop, got %s", recordID)
+	}
+	// 外层结构保留原始字节（model、stream 等不变）
+	if !bytes.Contains(newBody, []byte(`"model":"gpt-4o"`)) {
+		t.Error("outer JSON structure should be preserved")
 	}
 }
 
