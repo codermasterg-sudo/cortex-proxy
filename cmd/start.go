@@ -7,10 +7,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/cortex-io/cortex-proxy/config"
 	"github.com/cortex-io/cortex-proxy/instance"
+	"github.com/cortex-io/cortex-proxy/logger"
 	"github.com/cortex-io/cortex-proxy/platform"
 	"github.com/cortex-io/cortex-proxy/proxy"
 	"github.com/cortex-io/cortex-proxy/reporter"
@@ -48,6 +50,17 @@ func RunStart(args []string) {
 	debug := fs.Bool("debug", false, "Enable debug logging\n\tenv: CORTEX_DEBUG=1")
 
 	fs.Parse(args)
+
+	// Init file-based logging as early as possible.
+	// Logs go to <binary-dir>/logs/cortex-proxy-YYYY-MM-DD.log and stderr.
+	if binPath, err := os.Executable(); err == nil {
+		logDir := filepath.Join(filepath.Dir(binPath), "logs")
+		if cleanup, err := logger.Init(logDir); err != nil {
+			log.Printf("[WARN]  failed to init log file (%v), logging to stderr only", err)
+		} else {
+			defer cleanup()
+		}
+	}
 
 	// Enable debug as early as possible.
 	if *debug || os.Getenv("CORTEX_DEBUG") == "1" {

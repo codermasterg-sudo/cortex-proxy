@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
-	"os"
 	"sync/atomic"
 )
 
@@ -13,20 +12,18 @@ var _debugEnabled atomic.Bool
 // EnableDebug 开启 DEBUG 级日志，在 start 命令解析 --debug 标志后调用。
 func EnableDebug() { _debugEnabled.Store(true) }
 
-var _logger = log.New(os.Stderr, "", log.LstdFlags)
-
 func logDebug(format string, args ...any) {
 	if _debugEnabled.Load() {
-		_logger.Printf("[DEBUG] "+format, args...)
+		log.Printf("[DEBUG] "+format, args...)
 	}
 }
 
 func logInfo(format string, args ...any) {
-	_logger.Printf("[INFO]  "+format, args...)
+	log.Printf("[INFO]  "+format, args...)
 }
 
 func logWarn(format string, args ...any) {
-	_logger.Printf("[WARN]  "+format, args...)
+	log.Printf("[WARN]  "+format, args...)
 }
 
 func tlsVersionName(ver uint16) string {
